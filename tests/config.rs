@@ -86,6 +86,19 @@ fn debug_redacts_api_key() {
 }
 
 #[test]
+fn sanitize_api_key_strips_noise() {
+    use dcards::config::sanitize_api_key;
+
+    assert_eq!(sanitize_api_key("  sk-abc123  "), "sk-abc123");
+    assert_eq!(sanitize_api_key("sk-abc123\n"), "sk-abc123");
+    assert_eq!(sanitize_api_key("\"sk-abc123\""), "sk-abc123");
+    assert_eq!(sanitize_api_key("'sk-abc123'"), "sk-abc123");
+    assert_eq!(sanitize_api_key("Bearer sk-abc123"), "sk-abc123");
+    assert_eq!(sanitize_api_key("bearer sk-abc123 "), "sk-abc123");
+    assert_eq!(sanitize_api_key("   "), "");
+}
+
+#[test]
 fn normalize_base_url_appends_endpoint() {
     assert_eq!(
         normalize_base_url("http://localhost:11434/v1"),

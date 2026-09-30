@@ -511,7 +511,7 @@ impl DcardsApp {
         self.config.general.cards_limit = self.settings.cards_limit.max(1);
         self.config.general.theme = self.settings.theme;
         self.config.llm.base_url = self.settings.base_url.trim().to_string();
-        self.config.llm.api_key = self.settings.api_key.clone();
+        self.config.llm.api_key = crate::config::sanitize_api_key(&self.settings.api_key);
         self.config.llm.model = self.settings.model.trim().to_string();
         self.config.llm.timeout_secs = self.settings.timeout_secs;
         self.config.llm.max_tokens = self.settings.max_tokens;

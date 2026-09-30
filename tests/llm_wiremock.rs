@@ -183,6 +183,32 @@ async fn authorization_header_is_sent_when_key_is_present() {
 }
 
 #[tokio::test]
+async fn authorization_header_is_trimmed() {
+    let server = MockServer::start().await;
+    mount_chat(&server, chat_body(json!("ok"))).await;
+
+    let client = HttpLlmClient::new().unwrap();
+    let url = format!("{}/v1/chat/completions", server.uri());
+    client
+        .complete(request(
+            url,
+            "  \"Bearer secret-key\"\n",
+            Duration::from_secs(5),
+        ))
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let authorization = requests[0]
+        .headers
+        .get("authorization")
+        .expect("authorization header should be present")
+        .to_str()
+        .unwrap();
+    assert_eq!(authorization, "Bearer secret-key");
+}
+
+#[tokio::test]
 async fn authorization_header_is_omitted_without_key() {
     let server = MockServer::start().await;
     mount_chat(&server, chat_body(json!("ok"))).await;

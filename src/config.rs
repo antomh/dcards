@@ -258,11 +258,38 @@ impl Config {
         if self.llm.model.trim().is_empty() {
             return Err(LlmConfigError::EmptyModel);
         }
-        if self.llm.api_key.trim().is_empty() && !is_loopback_host(host) {
+        if sanitize_api_key(&self.llm.api_key).is_empty() && !is_loopback_host(host) {
             return Err(LlmConfigError::MissingApiKey);
         }
         Ok(())
     }
+}
+
+/// Normalise an API key typed or pasted by the user.
+///
+/// Trims whitespace (a pasted key often carries a trailing newline), removes
+/// one pair of surrounding quotes, and drops an accidental leading `Bearer `
+/// (so the value can be pasted straight from an `Authorization` header).
+pub fn sanitize_api_key(raw: &str) -> String {
+    let trimmed = raw.trim();
+
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|inner| inner.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed)
+        .trim();
+
+    let without_scheme = match unquoted.get(..7) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("bearer ") => unquoted[7..].trim(),
+        _ => unquoted,
+    };
+
+    without_scheme.to_string()
 }
 
 /// Normalise a base URL to the chat-completions endpoint.

@@ -136,6 +136,13 @@ impl DcardsApp {
                     Some(Err(message)) => {
                         ui.add_space(4.0);
                         ui.colored_label(ui.visuals().error_fg_color, format!("Error: {message}"));
+                        if message.contains("HTTP 401") {
+                            ui.colored_label(
+                                ui.visuals().warn_fg_color,
+                                "The API key was rejected (401). Check that the key is complete \
+                                 and still valid, then paste it again.",
+                            );
+                        }
                     }
                     None => {}
                 }

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{normalize_base_url, Config, LlmConfigError};
+use crate::config::{normalize_base_url, sanitize_api_key, Config, LlmConfigError};
 use crate::db::LangPair;
 
 pub use error::LlmError;
@@ -115,8 +115,10 @@ impl LlmClient for HttpLlmClient {
             .post(&request.url)
             .json(&body)
             .timeout(request.timeout);
-        if !request.api_key.is_empty() {
-            builder = builder.bearer_auth(&request.api_key);
+        let api_key = sanitize_api_key(&request.api_key);
+        tracing::debug!(url = %request.url, auth = !api_key.is_empty(), model = %request.model, "sending LLM request");
+        if !api_key.is_empty() {
+            builder = builder.bearer_auth(&api_key);
         }
 
         let response = builder.send().await.map_err(map_reqwest_error)?;
@@ -124,6 +126,7 @@ impl LlmClient for HttpLlmClient {
         let text = response.text().await.map_err(map_reqwest_error)?;
 
         if !status.is_success() {
+            tracing::warn!(url = %request.url, status = status.as_u16(), "LLM request was rejected");
             return Err(LlmError::Http {
                 status: status.as_u16(),
                 body_snippet: snippet(&text),
@@ -165,7 +168,7 @@ pub fn build_request(word: &str, pair: LangPair, config: &Config) -> Result<LlmR
         max_tokens: config.llm.max_tokens,
         temperature: config.llm.temperature,
         timeout: Duration::from_secs(config.llm.timeout_secs),
-        api_key: config.llm.api_key.clone(),
+        api_key: sanitize_api_key(&config.llm.api_key),
     })
 }
 
