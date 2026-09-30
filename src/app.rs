@@ -7,20 +7,25 @@ use eframe::egui;
 use rusqlite::Connection;
 
 use crate::config::{Config, Theme};
-use crate::db::{self, cards, groups, Card, CardFilter, Group};
+use crate::db::{self, cards, groups, Card, CardFilter, Group, Lang, LangPair};
 use crate::events::{AppEvent, EventSender, Repaint};
+use crate::llm::{self, HttpLlmClient, LlmClient};
 use crate::paths::Paths;
 use crate::single_instance::SingleInstance;
 use crate::ui::widgets::DateFilterState;
+use crate::ui::TestConnection;
 use crate::ui::{CardEditor, GroupEditor, GroupEditorMode, SettingsForm, View};
-use crate::{hotkey, tray};
+use crate::{hotkey, tray, validation};
 
 /// Root application object.
 pub struct DcardsApp {
     pub(crate) config: Config,
     pub(crate) paths: Paths,
     pub(crate) db: Mutex<Connection>,
+    pub(crate) tx: EventSender,
     pub(crate) rx: Receiver<AppEvent>,
+    pub(crate) repaint: Repaint,
+    pub(crate) runtime: tokio::runtime::Runtime,
     pub(crate) wayland: bool,
     pub(crate) quit: bool,
 
@@ -34,14 +39,13 @@ pub struct DcardsApp {
     pub(crate) card_editor: Option<CardEditor>,
     pub(crate) group_editor: Option<GroupEditor>,
     pub(crate) settings: SettingsForm,
+    pub(crate) test_connection: TestConnection,
     pub(crate) status: Option<String>,
 
     // Kept alive for the lifetime of the application; dropped on shutdown.
     _tray: Option<tray::TrayGuard>,
     _hotkey: Option<hotkey::HotkeyRegistration>,
     _instance: Option<SingleInstance>,
-    // Used by the HTTP layer in later stages.
-    _runtime: tokio::runtime::Runtime,
 }
 
 impl DcardsApp {
@@ -77,7 +81,7 @@ impl DcardsApp {
             tracing::info!("global hotkey disabled on Wayland");
             None
         } else {
-            match hotkey::register(tx, repaint.clone()) {
+            match hotkey::register(tx.clone(), repaint.clone()) {
                 Ok(guard) => {
                     tracing::info!("registered global hotkey Ctrl+Alt+S");
                     Some(guard)
@@ -96,7 +100,10 @@ impl DcardsApp {
             config,
             paths,
             db,
+            tx,
             rx,
+            repaint,
+            runtime,
             wayland,
             quit: false,
             view: View::Groups,
@@ -109,11 +116,11 @@ impl DcardsApp {
             card_editor: None,
             group_editor: None,
             settings,
+            test_connection: TestConnection::default(),
             status: None,
             _tray: tray,
             _hotkey: hotkey,
             _instance: instance,
-            _runtime: runtime,
         };
         app.refresh_groups();
         app
@@ -349,6 +356,56 @@ impl DcardsApp {
         }
     }
 
+    /// Run the settings "Test connection" request against the LLM.
+    ///
+    /// The test word depends on the source language of the active pair. The
+    /// result is delivered as [`AppEvent::TestConnectionDone`]. Nothing is
+    /// written to the database.
+    pub(crate) fn start_test_connection(&mut self) {
+        // Test the values currently typed in the form, not the saved config.
+        let mut config = self.config.clone();
+        config.general.language_pair = self.settings.language_pair;
+        config.llm.base_url = self.settings.base_url.trim().to_string();
+        config.llm.api_key = self.settings.api_key.clone();
+        config.llm.model = self.settings.model.trim().to_string();
+        config.llm.timeout_secs = self.settings.timeout_secs;
+        config.llm.max_tokens = self.settings.max_tokens;
+        config.llm.temperature = self.settings.temperature;
+
+        let pair: LangPair = config.general.language_pair.into();
+        let word = match pair.source() {
+            Lang::En => "hello",
+            Lang::Ru => "привет",
+        };
+
+        if let Err(err) = validation::validate_for_pair(word, pair.source()) {
+            self.test_connection = TestConnection::done(Err(err.to_string()));
+            return;
+        }
+
+        let request = match llm::build_request(word, pair, &config) {
+            Ok(request) => request,
+            Err(err) => {
+                self.test_connection = TestConnection::done(Err(err.to_string()));
+                return;
+            }
+        };
+
+        self.test_connection = TestConnection::loading();
+        let tx = self.tx.clone();
+        let repaint = self.repaint.clone();
+        self.runtime.spawn(async move {
+            let result = match HttpLlmClient::new() {
+                Ok(client) => client.complete(request).await,
+                Err(err) => Err(err),
+            };
+            let _ = tx.send(AppEvent::TestConnectionDone(
+                result.map_err(|err| err.to_string()),
+            ));
+            repaint.notify();
+        });
+    }
+
     pub(crate) fn set_status(&mut self, message: impl Into<String>) {
         self.status = Some(message.into());
     }
@@ -375,6 +432,9 @@ impl DcardsApp {
             }
             AppEvent::TrayQuit => {
                 self.quit = true;
+            }
+            AppEvent::TestConnectionDone(result) => {
+                self.test_connection = TestConnection::done(result);
             }
         }
     }

@@ -148,18 +148,9 @@ pub struct PromptsConfig {
 impl Default for PromptsConfig {
     fn default() -> Self {
         PromptsConfig {
-            en_en: "You are a dictionary. Reply with a concise English definition of the word. \
-                   Reply with a single line only, no quotes. If you cannot define it, reply \
-                   exactly: Translation unavailable"
-                .to_string(),
-            en_ru: "You are a dictionary. Reply with only the Russian translation of the word. \
-                    Reply with a single line only, no quotes. If you cannot translate it, reply \
-                    exactly: Translation unavailable"
-                .to_string(),
-            ru_en: "You are a dictionary. Reply with only the English translation of the word. \
-                    Reply with a single line only, no quotes. If you cannot translate it, reply \
-                    exactly: Translation unavailable"
-                .to_string(),
+            en_en: crate::llm::prompt::DEFAULT_EN_EN.to_string(),
+            en_ru: crate::llm::prompt::DEFAULT_EN_RU.to_string(),
+            ru_en: crate::llm::prompt::DEFAULT_RU_EN.to_string(),
         }
     }
 }

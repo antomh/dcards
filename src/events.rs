@@ -5,8 +5,8 @@ use std::sync::{Arc, OnceLock};
 use crossbeam_channel::Sender;
 
 /// An event produced by a background integration (tray, hotkey, second
-/// instance) and consumed by the eframe update loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// instance, LLM requests) and consumed by the eframe update loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
     /// The global hotkey was pressed.
     Hotkey,
@@ -18,6 +18,8 @@ pub enum AppEvent {
     TrayNewCard,
     /// "Quit" was chosen in the tray menu.
     TrayQuit,
+    /// Result of the settings "Test connection" request.
+    TestConnectionDone(Result<String, String>),
 }
 
 /// Sender half of the UI event channel.

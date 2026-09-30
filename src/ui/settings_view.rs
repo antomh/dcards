@@ -115,11 +115,30 @@ impl DcardsApp {
                         let ctx = ui.ctx().clone();
                         self.save_settings(&ctx);
                     }
-                    if ui.button("Test connection").clicked() {
-                        self.settings.status =
-                            Some("Test connection arrives in stage 3.".to_string());
+                    let busy = self.test_connection.loading;
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Test connection"))
+                        .clicked()
+                    {
+                        self.start_test_connection();
+                    }
+                    if busy {
+                        ui.spinner();
+                        ui.label("Testing...");
                     }
                 });
+
+                match &self.test_connection.result {
+                    Some(Ok(answer)) => {
+                        ui.add_space(4.0);
+                        ui.label(format!("OK: {answer}"));
+                    }
+                    Some(Err(message)) => {
+                        ui.add_space(4.0);
+                        ui.colored_label(ui.visuals().error_fg_color, format!("Error: {message}"));
+                    }
+                    None => {}
+                }
 
                 if let Some(status) = &self.settings.status {
                     ui.add_space(4.0);

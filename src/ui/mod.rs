@@ -129,6 +129,33 @@ impl SettingsForm {
     }
 }
 
+/// State of the settings "Test connection" request.
+#[derive(Debug, Clone, Default)]
+pub struct TestConnection {
+    /// Whether a request is currently in flight.
+    pub loading: bool,
+    /// Completed result: `Ok(answer)` or `Err(message)`.
+    pub result: Option<Result<String, String>>,
+}
+
+impl TestConnection {
+    /// A request is currently running.
+    pub fn loading() -> TestConnection {
+        TestConnection {
+            loading: true,
+            result: None,
+        }
+    }
+
+    /// A request finished with `result`.
+    pub fn done(result: Result<String, String>) -> TestConnection {
+        TestConnection {
+            loading: false,
+            result: Some(result),
+        }
+    }
+}
+
 /// Human-readable label for a language pair.
 pub fn language_pair_label(pair: LanguagePair) -> &'static str {
     match pair {
