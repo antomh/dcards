@@ -13,6 +13,7 @@ pub mod logging;
 pub mod notify;
 pub mod paths;
 pub mod pipeline;
+pub mod review;
 pub mod selection;
 pub mod single_instance;
 pub mod tray;

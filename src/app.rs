@@ -37,6 +37,8 @@ pub struct DcardsApp {
     pub(crate) cards_total: i64,
     pub(crate) selected_card: Option<i64>,
     pub(crate) date_filter: DateFilterState,
+    pub(crate) review: Option<crate::review::Session>,
+    pub(crate) review_filter: DateFilterState,
     pub(crate) card_editor: Option<CardEditor>,
     pub(crate) draft: Option<Draft>,
     pub(crate) next_generation: u64,
@@ -116,6 +118,8 @@ impl DcardsApp {
             cards_total: 0,
             selected_card: None,
             date_filter: DateFilterState::default(),
+            review: None,
+            review_filter: DateFilterState::default(),
             card_editor: None,
             draft: None,
             next_generation: 0,
@@ -698,6 +702,6 @@ fn apply_theme(ctx: &egui::Context, theme: Theme) {
 }
 
 /// Current local offset from UTC, in seconds.
-fn local_offset_seconds() -> i32 {
+pub(crate) fn local_offset_seconds() -> i32 {
     chrono::Local::now().offset().local_minus_utc()
 }
