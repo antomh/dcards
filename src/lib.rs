@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod config;
+pub mod db;
 pub mod events;
 pub mod hotkey;
 pub mod logging;
