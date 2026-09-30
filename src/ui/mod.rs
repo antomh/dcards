@@ -85,7 +85,7 @@ pub struct GroupEditor {
 }
 
 /// Editable copy of the settings shown in the settings view.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SettingsForm {
     /// Active language pair.
     pub language_pair: LanguagePair,
@@ -127,6 +127,26 @@ impl SettingsForm {
             temperature: config.llm.temperature,
             status: None,
         }
+    }
+}
+
+// Manual `Debug` so the API key cannot leak through `{:?}`.
+impl std::fmt::Debug for SettingsForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let api_key = if self.api_key.is_empty() { "" } else { "***" };
+        f.debug_struct("SettingsForm")
+            .field("language_pair", &self.language_pair)
+            .field("default_group", &self.default_group)
+            .field("cards_limit", &self.cards_limit)
+            .field("theme", &self.theme)
+            .field("base_url", &self.base_url)
+            .field("api_key", &api_key)
+            .field("model", &self.model)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("status", &self.status)
+            .finish()
     }
 }
 

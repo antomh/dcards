@@ -610,6 +610,8 @@ impl DcardsApp {
                 self.handle_hotkey();
             }
             AppEvent::Activate | AppEvent::TrayOpen => {
+                tracing::info!("bringing the main window to the front");
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }

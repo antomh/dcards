@@ -15,10 +15,17 @@ use crate::events::{AppEvent, EventSender, Repaint};
 
 /// Whether the current session is Wayland.
 pub fn is_wayland() -> bool {
-    let wayland_display = std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty());
-    let session_type =
-        std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v.eq_ignore_ascii_case("wayland"));
-    wayland_display || session_type
+    let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+    let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
+    detect_wayland(session_type.as_deref(), wayland_display.as_deref())
+}
+
+/// Pure helper behind [`is_wayland`], testable without touching the process
+/// environment.
+fn detect_wayland(session_type: Option<&str>, wayland_display: Option<&str>) -> bool {
+    let by_display = wayland_display.is_some_and(|value| !value.is_empty());
+    let by_type = session_type.is_some_and(|value| value.eq_ignore_ascii_case("wayland"));
+    by_display || by_type
 }
 
 /// Keeps the hotkey manager alive for as long as the application runs.
@@ -48,4 +55,25 @@ pub fn register(tx: EventSender, repaint: Repaint) -> anyhow::Result<HotkeyRegis
         })?;
 
     Ok(HotkeyRegistration { _manager: manager })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_wayland;
+
+    #[test]
+    fn detects_wayland_sessions() {
+        assert!(detect_wayland(Some("wayland"), None));
+        assert!(detect_wayland(Some("Wayland"), None));
+        assert!(detect_wayland(None, Some("wayland-0")));
+        assert!(detect_wayland(Some("x11"), Some("wayland-0")));
+    }
+
+    #[test]
+    fn detects_x11_sessions() {
+        assert!(!detect_wayland(Some("x11"), None));
+        assert!(!detect_wayland(Some("X11"), Some("")));
+        assert!(!detect_wayland(None, None));
+        assert!(!detect_wayland(None, Some("")));
+    }
 }
