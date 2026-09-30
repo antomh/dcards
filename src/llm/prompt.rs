@@ -4,19 +4,19 @@ use crate::config::PromptsConfig;
 use crate::db::LangPair;
 
 /// Default system prompt for `en-en`.
-pub const DEFAULT_EN_EN: &str = "You are a dictionary. Reply with a concise English definition of \
-the word. Reply with a single line only, no quotes. If you cannot define it, reply exactly: \
-Translation unavailable";
+pub const DEFAULT_EN_EN: &str = "You are a dictionary for learners of English. Define the word in \
+one sentence using simple, common words (avoid rare or technical terms). One line only, no quotes, \
+no examples. If you cannot define it, reply exactly: Translation unavailable";
 
 /// Default system prompt for `en-ru`.
-pub const DEFAULT_EN_RU: &str = "You are a dictionary. Reply with only the Russian translation of \
-the word. Reply with a single line only, no quotes. If you cannot translate it, reply exactly: \
-Translation unavailable";
+pub const DEFAULT_EN_RU: &str = "You are a dictionary. Give the most common everyday Russian \
+translation of the word: one word if possible, no rare synonyms. One line only, no quotes, no \
+explanations. If you cannot translate it, reply exactly: Translation unavailable";
 
 /// Default system prompt for `ru-en`.
-pub const DEFAULT_RU_EN: &str = "You are a dictionary. Reply with only the English translation of \
-the word. Reply with a single line only, no quotes. If you cannot translate it, reply exactly: \
-Translation unavailable";
+pub const DEFAULT_RU_EN: &str = "You are a dictionary. Give the most common everyday English \
+translation of the word: one word if possible, no rare synonyms. One line only, no quotes, no \
+explanations. If you cannot translate it, reply exactly: Translation unavailable";
 
 /// Literal the model is asked to return when it cannot translate or define the
 /// word. Recognised case-insensitively by [`is_marker`].
@@ -81,5 +81,31 @@ mod tests {
         assert!(!is_marker("Translation"));
         assert!(!is_marker("сердце"));
         assert!(!is_marker(""));
+    }
+
+    #[test]
+    fn default_prompts_mention_the_marker() {
+        // The fallback instruction must match what `is_marker` recognises.
+        for template in [DEFAULT_EN_EN, DEFAULT_EN_RU, DEFAULT_RU_EN] {
+            assert!(
+                template.contains(DEFAULT_MARKER),
+                "template should instruct the model to use the marker"
+            );
+        }
+    }
+
+    #[test]
+    fn en_en_default_asks_for_simple_language() {
+        let prompt = DEFAULT_EN_EN.to_lowercase();
+        assert!(prompt.contains("simple"));
+        assert!(prompt.contains("one sentence"));
+    }
+
+    #[test]
+    fn translation_defaults_ask_for_the_common_word() {
+        for template in [DEFAULT_EN_RU, DEFAULT_RU_EN] {
+            assert!(template.contains("most common everyday"));
+            assert!(template.contains("one word if possible"));
+        }
     }
 }
