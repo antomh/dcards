@@ -1,13 +1,16 @@
 //! dcards — a flashcard dictionary for Linux.
 //!
-//! Stage 0: process bootstrap (paths, configuration, logging, single instance),
-//! tray/hotkey integration and an empty eframe window.
+//! Process bootstrap: paths, configuration, logging, single instance, database
+//! and the eframe application.
+
+use std::sync::Mutex;
 
 use crossbeam_channel::unbounded;
 use eframe::egui;
 
 use dcards::app::DcardsApp;
 use dcards::config::Config;
+use dcards::db;
 use dcards::events::Repaint;
 use dcards::paths::Paths;
 use dcards::{hotkey, logging, single_instance};
@@ -55,6 +58,19 @@ fn main() -> anyhow::Result<()> {
         tracing::warn!("Wayland session detected: global hotkey will be disabled");
     }
 
+    // Open the database, create the schema and make sure a default group exists.
+    let db_path = config
+        .storage
+        .db_path
+        .clone()
+        .unwrap_or_else(|| paths.db_file.clone());
+    let connection = db::open(&db_path)?;
+    db::migrate(&connection)?;
+    db::bootstrap_default_group(&connection, &config.general.default_group)?;
+    db::set_slow_query_warn_ms(config.logging.slow_query_warn_ms);
+    tracing::info!(path = %db_path.display(), "database ready");
+    let db = Mutex::new(connection);
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -72,7 +88,7 @@ fn main() -> anyhow::Result<()> {
         native_options,
         Box::new(move |cc| {
             Ok(Box::new(DcardsApp::new(
-                cc, config, paths, tx, rx, repaint, runtime, instance, wayland,
+                cc, config, paths, db, tx, rx, repaint, runtime, instance, wayland,
             )))
         }),
     );

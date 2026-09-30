@@ -13,3 +13,4 @@ pub mod notify;
 pub mod paths;
 pub mod single_instance;
 pub mod tray;
+pub mod ui;

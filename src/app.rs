@@ -1,25 +1,41 @@
-//! The eframe application: top-level state, event pump and (for now) a stub UI.
+//! The eframe application: top-level state, event pump and view routing.
+
+use std::sync::Mutex;
 
 use crossbeam_channel::Receiver;
 use eframe::egui;
+use rusqlite::Connection;
 
 use crate::config::{Config, Theme};
+use crate::db::{self, cards, groups, Card, CardFilter, Group};
 use crate::events::{AppEvent, EventSender, Repaint};
 use crate::paths::Paths;
 use crate::single_instance::SingleInstance;
-use crate::{hotkey, notify, tray};
-
-/// How many recent events to keep for the stub UI.
-const MAX_RECENT_EVENTS: usize = 50;
+use crate::ui::widgets::DateFilterState;
+use crate::ui::{CardEditor, GroupEditor, GroupEditorMode, SettingsForm, View};
+use crate::{hotkey, tray};
 
 /// Root application object.
 pub struct DcardsApp {
-    config: Config,
-    paths: Paths,
-    rx: Receiver<AppEvent>,
-    wayland: bool,
-    quit: bool,
-    recent_events: Vec<String>,
+    pub(crate) config: Config,
+    pub(crate) paths: Paths,
+    pub(crate) db: Mutex<Connection>,
+    pub(crate) rx: Receiver<AppEvent>,
+    pub(crate) wayland: bool,
+    pub(crate) quit: bool,
+
+    pub(crate) view: View,
+    pub(crate) groups: Vec<Group>,
+    pub(crate) selected_group: Option<i64>,
+    pub(crate) cards: Vec<Card>,
+    pub(crate) cards_total: i64,
+    pub(crate) selected_card: Option<i64>,
+    pub(crate) date_filter: DateFilterState,
+    pub(crate) card_editor: Option<CardEditor>,
+    pub(crate) group_editor: Option<GroupEditor>,
+    pub(crate) settings: SettingsForm,
+    pub(crate) status: Option<String>,
+
     // Kept alive for the lifetime of the application; dropped on shutdown.
     _tray: Option<tray::TrayGuard>,
     _hotkey: Option<hotkey::HotkeyRegistration>,
@@ -29,12 +45,13 @@ pub struct DcardsApp {
 }
 
 impl DcardsApp {
-    /// Build the application, wiring up the tray and global hotkey.
+    /// Build the application, wiring up the tray, hotkey and initial data.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         config: Config,
         paths: Paths,
+        db: Mutex<Connection>,
         tx: EventSender,
         rx: Receiver<AppEvent>,
         repaint: Repaint,
@@ -74,46 +91,314 @@ impl DcardsApp {
             }
         };
 
-        DcardsApp {
+        let settings = SettingsForm::from_config(&config);
+        let mut app = DcardsApp {
             config,
             paths,
+            db,
             rx,
             wayland,
             quit: false,
-            recent_events: Vec::new(),
+            view: View::Groups,
+            groups: Vec::new(),
+            selected_group: None,
+            cards: Vec::new(),
+            cards_total: 0,
+            selected_card: None,
+            date_filter: DateFilterState::default(),
+            card_editor: None,
+            group_editor: None,
+            settings,
+            status: None,
             _tray: tray,
             _hotkey: hotkey,
             _instance: instance,
             _runtime: runtime,
+        };
+        app.refresh_groups();
+        app
+    }
+
+    /// Lock the database, recovering from a poisoned mutex.
+    pub(crate) fn with_conn<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> db::Result<T>,
+    ) -> db::Result<T> {
+        let conn = self
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&conn)
+    }
+
+    /// The group currently selected in the main view.
+    pub(crate) fn current_group(&self) -> Option<&Group> {
+        let id = self.selected_group?;
+        self.groups.iter().find(|group| group.id == id)
+    }
+
+    /// Reload the group list and keep a valid selection.
+    pub(crate) fn refresh_groups(&mut self) {
+        match self.with_conn(groups::list) {
+            Ok(groups) => {
+                self.groups = groups;
+
+                if let Some(id) = self.selected_group {
+                    if !self.groups.iter().any(|group| group.id == id) {
+                        self.selected_group = None;
+                    }
+                }
+                if self.selected_group.is_none() {
+                    let default_name = self.config.general.default_group.clone();
+                    self.selected_group = self
+                        .groups
+                        .iter()
+                        .find(|group| group.name == default_name)
+                        .map(|group| group.id)
+                        .or_else(|| self.groups.first().map(|group| group.id));
+                    self.selected_card = None;
+                }
+                self.refresh_cards();
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "failed to load groups");
+                self.set_error(format!("Failed to load groups: {err}"));
+            }
         }
+    }
+
+    /// Reload the cards of the selected group using the current filter.
+    pub(crate) fn refresh_cards(&mut self) {
+        let Some(group_id) = self.selected_group else {
+            self.cards.clear();
+            self.cards_total = 0;
+            return;
+        };
+
+        let filter = self.current_filter(group_id);
+        let limit = self.config.general.cards_limit;
+        let result = self.with_conn(|conn| {
+            let cards = cards::list_by_group(conn, group_id, &filter, limit)?;
+            let total = cards::count_by_group(conn, group_id)?;
+            Ok((cards, total))
+        });
+
+        match result {
+            Ok((cards, total)) => {
+                self.cards = cards;
+                self.cards_total = total;
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "failed to load cards");
+                self.set_error(format!("Failed to load cards: {err}"));
+            }
+        }
+    }
+
+    fn current_filter(&self, group_id: i64) -> CardFilter {
+        let (from, to) = self
+            .date_filter
+            .resolve(chrono::Utc::now().timestamp(), local_offset_seconds());
+        CardFilter {
+            group_id: Some(group_id),
+            from,
+            to,
+        }
+    }
+
+    /// Open a blank card editor.
+    pub(crate) fn new_card(&mut self) {
+        let default_name = self.config.general.default_group.clone();
+        let group_id = self
+            .selected_group
+            .or_else(|| {
+                self.groups
+                    .iter()
+                    .find(|group| group.name == default_name)
+                    .map(|group| group.id)
+            })
+            .or_else(|| self.groups.first().map(|group| group.id));
+        let Some(group_id) = group_id else {
+            self.set_error("No groups available.");
+            return;
+        };
+        self.card_editor = Some(CardEditor::new(group_id));
+    }
+
+    /// Open the editor for an existing card.
+    pub(crate) fn edit_card(&mut self, id: i64) {
+        let cached = self.cards.iter().find(|card| card.id == id).cloned();
+        if let Some(card) = cached {
+            self.card_editor = Some(CardEditor::edit(&card));
+            return;
+        }
+        // The card may be hidden by the current filter; fall back to the DB.
+        match self.with_conn(|conn| cards::get(conn, id)) {
+            Ok(card) => self.card_editor = Some(CardEditor::edit(&card)),
+            Err(err) => self.set_error(format!("Card not found: {err}")),
+        }
+    }
+
+    /// Delete a card.
+    pub(crate) fn delete_card(&mut self, id: i64) {
+        match self.with_conn(|conn| cards::delete(conn, id)) {
+            Ok(()) => {
+                if self.selected_card == Some(id) {
+                    self.selected_card = None;
+                }
+                self.refresh_cards();
+                self.set_status("Card deleted");
+            }
+            Err(err) => self.set_error(format!("Failed to delete card: {err}")),
+        }
+    }
+
+    /// Persist the card editor contents.
+    pub(crate) fn commit_card(&mut self, editor: &CardEditor) -> Result<(), String> {
+        let front = editor.front.clone();
+        let back = editor.back.clone();
+        let group_id = editor.group_id;
+        let id = editor.id;
+        self.with_conn(|conn| match id {
+            Some(id) => cards::update(conn, id, &front, &back, group_id),
+            None => cards::create(conn, &front, &back, group_id).map(|_| ()),
+        })
+        .map_err(|err| err.to_string())
+    }
+
+    /// Open the group creation dialog.
+    pub(crate) fn new_group(&mut self) {
+        self.group_editor = Some(GroupEditor {
+            mode: GroupEditorMode::Create,
+            name: String::new(),
+            error: None,
+        });
+    }
+
+    /// Open the group rename dialog for `id`.
+    pub(crate) fn rename_group(&mut self, id: i64) {
+        let name = self
+            .groups
+            .iter()
+            .find(|group| group.id == id)
+            .map(|group| group.name.clone())
+            .unwrap_or_default();
+        self.group_editor = Some(GroupEditor {
+            mode: GroupEditorMode::Rename(id),
+            name,
+            error: None,
+        });
+    }
+
+    /// Delete a group (refused for the last or a non-empty group).
+    pub(crate) fn delete_group(&mut self, id: i64) {
+        match self.with_conn(|conn| groups::delete(conn, id)) {
+            Ok(()) => {
+                if self.selected_group == Some(id) {
+                    self.selected_group = None;
+                }
+                self.refresh_groups();
+                self.set_status("Group deleted");
+            }
+            Err(err) => self.set_error(format!("Failed to delete group: {err}")),
+        }
+    }
+
+    /// Persist the group editor contents.
+    pub(crate) fn commit_group_editor(&mut self, editor: &GroupEditor) -> Result<(), String> {
+        let name = editor.name.clone();
+        let result = match editor.mode {
+            GroupEditorMode::Create => {
+                self.with_conn(|conn| groups::create(conn, &name).map(|_| ()))
+            }
+            GroupEditorMode::Rename(id) => self.with_conn(|conn| groups::rename(conn, id, &name)),
+        };
+        match result {
+            Ok(()) => {
+                self.refresh_groups();
+                Ok(())
+            }
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    /// Copy the settings form into the configuration and persist it.
+    pub(crate) fn save_settings(&mut self, ctx: &egui::Context) {
+        self.config.general.language_pair = self.settings.language_pair;
+        self.config.general.default_group = self.settings.default_group.trim().to_string();
+        self.config.general.cards_limit = self.settings.cards_limit.max(1);
+        self.config.general.theme = self.settings.theme;
+        self.config.llm.base_url = self.settings.base_url.trim().to_string();
+        self.config.llm.api_key = self.settings.api_key.clone();
+        self.config.llm.model = self.settings.model.trim().to_string();
+        self.config.llm.timeout_secs = self.settings.timeout_secs;
+        self.config.llm.max_tokens = self.settings.max_tokens;
+        self.config.llm.temperature = self.settings.temperature;
+
+        match self.config.save(&self.paths.config_file) {
+            Ok(()) => {
+                apply_theme(ctx, self.config.general.theme);
+                db::set_slow_query_warn_ms(self.config.logging.slow_query_warn_ms);
+                self.settings.status = Some("Settings saved.".to_string());
+                self.set_status("Settings saved");
+                self.refresh_cards();
+            }
+            Err(err) => {
+                self.settings.status = Some(format!("Failed to save settings: {err:#}"));
+            }
+        }
+    }
+
+    pub(crate) fn set_status(&mut self, message: impl Into<String>) {
+        self.status = Some(message.into());
+    }
+
+    pub(crate) fn set_error(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        tracing::warn!("{message}");
+        self.status = Some(message);
     }
 
     fn handle_event(&mut self, ctx: &egui::Context, event: AppEvent) {
         tracing::debug!(?event, "app event");
         match event {
             AppEvent::Hotkey => {
-                tracing::info!("global hotkey pressed");
-                self.push_event("hotkey pressed");
+                tracing::info!("global hotkey pressed (card creation arrives in stage 4)");
             }
             AppEvent::Activate | AppEvent::TrayOpen => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                self.push_event("window activated");
             }
             AppEvent::TrayNewCard => {
-                self.push_event("tray: new card (not implemented yet)");
+                self.view = View::Groups;
+                self.new_card();
             }
             AppEvent::TrayQuit => {
-                self.push_event("tray: quit");
                 self.quit = true;
             }
         }
     }
 
-    fn push_event(&mut self, message: impl Into<String>) {
-        self.recent_events.push(message.into());
-        if self.recent_events.len() > MAX_RECENT_EVENTS {
-            self.recent_events.remove(0);
+    fn ui_top_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("dcards");
+            ui.separator();
+            ui.selectable_value(&mut self.view, View::Groups, "Groups");
+            ui.selectable_value(&mut self.view, View::Review, "Review");
+            ui.selectable_value(&mut self.view, View::Settings, "Settings");
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(status) = &self.status {
+                    ui.label(status.as_str());
+                }
+            });
+        });
+
+        if self.wayland {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "Wayland session: the global hotkey is unavailable.",
+            );
         }
     }
 }
@@ -124,38 +409,26 @@ impl eframe::App for DcardsApp {
             self.handle_event(ctx, event);
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("dcards");
-            ui.label("Stage 0 skeleton. Persistence, LLM and the card UI arrive in later stages.");
-            ui.add_space(8.0);
+        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| self.ui_top_bar(ui));
 
-            ui.label(format!("config: {}", self.paths.config_file.display()));
-            ui.label(format!("database: {}", self.paths.db_file.display()));
-            ui.label(format!("logs: {}", self.paths.log_dir.display()));
-            ui.label(format!(
-                "language pair: {}",
-                language_pair_label(self.config.general.language_pair)
-            ));
-
-            if self.wayland {
-                ui.add_space(4.0);
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    "Wayland session detected: the global hotkey is unavailable.",
-                );
+        match self.view {
+            View::Groups => {
+                egui::SidePanel::left("groups_panel")
+                    .resizable(true)
+                    .default_width(220.0)
+                    .show(ctx, |ui| self.ui_groups_panel(ui));
+                egui::CentralPanel::default().show(ctx, |ui| self.ui_cards_panel(ui));
             }
-
-            ui.add_space(8.0);
-            if ui.button("Test notification").clicked() {
-                notify::info("dcards", "Notifications are working.");
+            View::Review => {
+                egui::CentralPanel::default().show(ctx, |ui| self.ui_review(ui));
             }
-
-            ui.separator();
-            ui.label("Recent events:");
-            for line in self.recent_events.iter().rev().take(10) {
-                ui.monospace(line);
+            View::Settings => {
+                egui::CentralPanel::default().show(ctx, |ui| self.ui_settings(ui));
             }
-        });
+        }
+
+        self.ui_group_editor(ctx);
+        self.ui_card_editor(ctx);
 
         if self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -170,11 +443,7 @@ fn apply_theme(ctx: &egui::Context, theme: Theme) {
     });
 }
 
-fn language_pair_label(pair: crate::config::LanguagePair) -> &'static str {
-    use crate::config::LanguagePair;
-    match pair {
-        LanguagePair::EnEn => "en-en",
-        LanguagePair::EnRu => "en-ru",
-        LanguagePair::RuEn => "ru-en",
-    }
+/// Current local offset from UTC, in seconds.
+fn local_offset_seconds() -> i32 {
+    chrono::Local::now().offset().local_minus_utc()
 }
