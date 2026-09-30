@@ -5,8 +5,9 @@ use crate::db::LangPair;
 
 /// Default system prompt for `en-en`.
 pub const DEFAULT_EN_EN: &str = "You are a dictionary for learners of English. Define the word in \
-one sentence using simple, common words (avoid rare or technical terms). One line only, no quotes, \
-no examples. If you cannot define it, reply exactly: Translation unavailable";
+one short sentence of at most 12 words, using simple, common words (no rare or technical terms). \
+One line only, no quotes, no examples. If you cannot define it, reply exactly: Translation \
+unavailable";
 
 /// Default system prompt for `en-ru`.
 pub const DEFAULT_EN_RU: &str = "You are a dictionary. Give the most common everyday Russian \
@@ -98,7 +99,8 @@ mod tests {
     fn en_en_default_asks_for_simple_language() {
         let prompt = DEFAULT_EN_EN.to_lowercase();
         assert!(prompt.contains("simple"));
-        assert!(prompt.contains("one sentence"));
+        assert!(prompt.contains("one short sentence"));
+        assert!(prompt.contains("at most 12 words"));
     }
 
     #[test]
