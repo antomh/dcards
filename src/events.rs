@@ -18,6 +18,20 @@ pub enum AppEvent {
     TrayNewCard,
     /// "Quit" was chosen in the tray menu.
     TrayQuit,
+    /// A translation finished successfully.
+    TranslationDone {
+        /// Request generation; stale results are ignored.
+        generation: u64,
+        /// Cleaned answer.
+        back: String,
+    },
+    /// A translation failed.
+    TranslationFailed {
+        /// Request generation; stale results are ignored.
+        generation: u64,
+        /// Error message.
+        error: String,
+    },
     /// Result of the settings "Test connection" request.
     TestConnectionDone(Result<String, String>),
 }

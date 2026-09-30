@@ -1,6 +1,7 @@
 //! egui views and shared UI state.
 
 pub mod cards_view;
+pub mod draft;
 pub mod groups_view;
 pub mod review_view;
 pub mod settings_view;

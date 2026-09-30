@@ -11,11 +11,12 @@ use crate::db::{self, cards, groups, Card, CardFilter, Group, Lang, LangPair};
 use crate::events::{AppEvent, EventSender, Repaint};
 use crate::llm::{self, HttpLlmClient, LlmClient};
 use crate::paths::Paths;
+use crate::pipeline::{self, CleanOutcome, Draft, DraftOutcome, TranslationEffect};
 use crate::single_instance::SingleInstance;
 use crate::ui::widgets::DateFilterState;
 use crate::ui::TestConnection;
 use crate::ui::{CardEditor, GroupEditor, GroupEditorMode, SettingsForm, View};
-use crate::{hotkey, tray, validation};
+use crate::{hotkey, notify, selection, tray, validation};
 
 /// Root application object.
 pub struct DcardsApp {
@@ -37,6 +38,8 @@ pub struct DcardsApp {
     pub(crate) selected_card: Option<i64>,
     pub(crate) date_filter: DateFilterState,
     pub(crate) card_editor: Option<CardEditor>,
+    pub(crate) draft: Option<Draft>,
+    pub(crate) next_generation: u64,
     pub(crate) group_editor: Option<GroupEditor>,
     pub(crate) settings: SettingsForm,
     pub(crate) test_connection: TestConnection,
@@ -114,6 +117,8 @@ impl DcardsApp {
             selected_card: None,
             date_filter: DateFilterState::default(),
             card_editor: None,
+            draft: None,
+            next_generation: 0,
             group_editor: None,
             settings,
             test_connection: TestConnection::default(),
@@ -213,23 +218,189 @@ impl DcardsApp {
         }
     }
 
-    /// Open a blank card editor.
+    /// Open a blank draft. No translation request is made.
     pub(crate) fn new_card(&mut self) {
-        let default_name = self.config.general.default_group.clone();
-        let group_id = self
-            .selected_group
-            .or_else(|| {
-                self.groups
-                    .iter()
-                    .find(|group| group.name == default_name)
-                    .map(|group| group.id)
-            })
-            .or_else(|| self.groups.first().map(|group| group.id));
-        let Some(group_id) = group_id else {
+        self.show_draft(String::new(), String::new(), None, None);
+    }
+
+    /// The default group id: the configured group, else the first by name.
+    fn default_group_id(&self) -> Option<i64> {
+        let name = self.config.general.default_group.as_str();
+        self.groups
+            .iter()
+            .find(|group| group.name == name)
+            .map(|group| group.id)
+            .or_else(|| self.groups.first().map(|group| group.id))
+    }
+
+    /// Open or refresh the draft window.
+    ///
+    /// When `request` is `Some`, a translation is started and its result is
+    /// delivered through the event channel, tagged with a new generation.
+    fn show_draft(
+        &mut self,
+        front: String,
+        back: String,
+        note: Option<String>,
+        request: Option<llm::LlmRequest>,
+    ) {
+        let kept_group = self
+            .draft
+            .as_ref()
+            .map(|draft| draft.group_id)
+            .filter(|id| self.groups.iter().any(|group| group.id == *id));
+        let Some(group_id) = kept_group.or_else(|| self.default_group_id()) else {
             self.set_error("No groups available.");
             return;
         };
-        self.card_editor = Some(CardEditor::new(group_id));
+
+        let generation = if request.is_some() {
+            self.next_generation = self.next_generation.wrapping_add(1);
+            self.next_generation
+        } else {
+            self.next_generation
+        };
+
+        self.draft = Some(Draft {
+            front,
+            back,
+            group_id,
+            note,
+            loading: request.is_some(),
+            generation,
+            focus_front: true,
+        });
+
+        if let Some(request) = request {
+            let tx = self.tx.clone();
+            let repaint = self.repaint.clone();
+            self.runtime.spawn(async move {
+                let result = match HttpLlmClient::new() {
+                    Ok(client) => client.complete(request).await,
+                    Err(err) => Err(err),
+                };
+                let event = match result {
+                    Ok(back) => AppEvent::TranslationDone { generation, back },
+                    Err(err) => AppEvent::TranslationFailed {
+                        generation,
+                        error: err.to_string(),
+                    },
+                };
+                let _ = tx.send(event);
+                repaint.notify();
+            });
+        }
+    }
+
+    /// Save the draft as a new card.
+    pub(crate) fn save_draft(&mut self) {
+        let Some(draft) = self.draft.as_ref() else {
+            return;
+        };
+        let front = draft.front.trim().to_string();
+        let back = draft.back.clone();
+        let group_id = draft.group_id;
+
+        if front.is_empty() {
+            self.set_error("Front must not be empty");
+            return;
+        }
+
+        match self.with_conn(|conn| pipeline::save_card(conn, &front, &back, group_id)) {
+            Ok(card) => {
+                self.draft = None;
+                self.selected_card = Some(card.id);
+                self.refresh_cards();
+                self.set_status("Card saved");
+            }
+            Err(err) => {
+                if let Some(draft) = &mut self.draft {
+                    draft.note = Some(err.to_string());
+                }
+                self.set_error(format!("Failed to save card: {err}"));
+            }
+        }
+    }
+
+    /// Clean the front field and (re)translate it, keeping the current back.
+    pub(crate) fn draft_clean_translate(&mut self) {
+        let config = self.config.clone();
+        let Some(draft) = self.draft.as_ref() else {
+            return;
+        };
+        let front = draft.front.clone();
+
+        match pipeline::clean_and_translate(&front, &config) {
+            CleanOutcome::Note { note } => {
+                if let Some(draft) = &mut self.draft {
+                    draft.note = Some(note.clone());
+                }
+                notify::error("dcards", &note);
+            }
+            CleanOutcome::Translate {
+                front,
+                request,
+                truncated,
+            } => {
+                self.next_generation = self.next_generation.wrapping_add(1);
+                let generation = self.next_generation;
+                if let Some(draft) = &mut self.draft {
+                    draft.front = front;
+                    draft.note = None;
+                    draft.loading = true;
+                    draft.generation = generation;
+                }
+                if truncated {
+                    notify::info("dcards", pipeline::NOTE_TRUNCATED);
+                }
+                let tx = self.tx.clone();
+                let repaint = self.repaint.clone();
+                self.runtime.spawn(async move {
+                    let result = match HttpLlmClient::new() {
+                        Ok(client) => client.complete(request).await,
+                        Err(err) => Err(err),
+                    };
+                    let event = match result {
+                        Ok(back) => AppEvent::TranslationDone { generation, back },
+                        Err(err) => AppEvent::TranslationFailed {
+                            generation,
+                            error: err.to_string(),
+                        },
+                    };
+                    let _ = tx.send(event);
+                    repaint.notify();
+                });
+            }
+        }
+    }
+
+    /// Run the hotkey pipeline and open or refresh the draft.
+    fn handle_hotkey(&mut self) {
+        let selected = selection::read_selection();
+        let config = self.config.clone();
+        let outcome = pipeline::on_hotkey(selected.as_deref(), &config);
+        let refreshing = self.draft.is_some();
+
+        match outcome {
+            DraftOutcome::Static { front, back, note } => {
+                if let Some(note) = &note {
+                    if note == pipeline::NOTE_TRUNCATED {
+                        notify::info("dcards", note);
+                    } else {
+                        notify::error("dcards", note);
+                    }
+                } else if refreshing {
+                    notify::info("dcards", "Draft updated");
+                }
+                self.show_draft(front, back, note, None);
+            }
+            DraftOutcome::Translate { front, request } => {
+                if refreshing {
+                    notify::info("dcards", "Draft updated");
+                }
+                self.show_draft(front, String::new(), None, Some(request));
+            }
+        }
     }
 
     /// Open the editor for an existing card.
@@ -420,7 +591,8 @@ impl DcardsApp {
         tracing::debug!(?event, "app event");
         match event {
             AppEvent::Hotkey => {
-                tracing::info!("global hotkey pressed (card creation arrives in stage 4)");
+                tracing::info!("global hotkey pressed");
+                self.handle_hotkey();
             }
             AppEvent::Activate | AppEvent::TrayOpen => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -432,6 +604,27 @@ impl DcardsApp {
             }
             AppEvent::TrayQuit => {
                 self.quit = true;
+            }
+            AppEvent::TranslationDone { generation, back } => {
+                if let Some(draft) = &mut self.draft {
+                    if let Some(TranslationEffect::Applied { marker }) =
+                        pipeline::apply_result(draft, generation, Ok(back))
+                    {
+                        if marker {
+                            draft.note = Some("Translation unavailable".to_string());
+                            notify::info("dcards", "Translation unavailable");
+                        }
+                    }
+                }
+            }
+            AppEvent::TranslationFailed { generation, error } => {
+                if let Some(draft) = &mut self.draft {
+                    if draft.generation == generation {
+                        draft.loading = false;
+                        draft.note = Some(error.clone());
+                        notify::error("dcards", &error);
+                    }
+                }
             }
             AppEvent::TestConnectionDone(result) => {
                 self.test_connection = TestConnection::done(result);
@@ -489,6 +682,7 @@ impl eframe::App for DcardsApp {
 
         self.ui_group_editor(ctx);
         self.ui_card_editor(ctx);
+        self.ui_draft_viewport(ctx);
 
         if self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
