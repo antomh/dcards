@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 
-pub use models::{Card, CardFilter, Group, Lang, LangPair};
+pub use models::{Card, CardFilter, ExportRow, Group, Lang, LangPair};
 
 /// Errors returned by the database layer.
 #[derive(Debug, thiserror::Error)]

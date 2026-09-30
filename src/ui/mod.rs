@@ -130,6 +130,56 @@ impl SettingsForm {
     }
 }
 
+/// Which import/export operation the dialog will run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoMode {
+    /// Export the cards of the selected group.
+    ExportGroup,
+    /// Export every card.
+    ExportAll,
+    /// Import a TSV file.
+    Import,
+}
+
+/// State of the import/export dialog.
+#[derive(Debug, Clone)]
+pub struct IoDialog {
+    /// Operation to run.
+    pub mode: IoMode,
+    /// File path entered by the user.
+    pub path: String,
+    /// Last result or error message.
+    pub message: Option<String>,
+}
+
+impl IoDialog {
+    /// A dialog for `mode` with an empty path.
+    pub fn new(mode: IoMode) -> IoDialog {
+        IoDialog {
+            mode,
+            path: String::new(),
+            message: None,
+        }
+    }
+
+    /// Window title for the mode.
+    pub fn title(&self) -> &'static str {
+        match self.mode {
+            IoMode::ExportGroup => "Export this group",
+            IoMode::ExportAll => "Export all cards",
+            IoMode::Import => "Import TSV",
+        }
+    }
+
+    /// Label of the confirm button.
+    pub fn action_label(&self) -> &'static str {
+        match self.mode {
+            IoMode::ExportGroup | IoMode::ExportAll => "Export",
+            IoMode::Import => "Import",
+        }
+    }
+}
+
 /// State of the settings "Test connection" request.
 #[derive(Debug, Clone, Default)]
 pub struct TestConnection {

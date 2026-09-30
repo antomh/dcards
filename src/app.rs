@@ -15,7 +15,7 @@ use crate::pipeline::{self, CleanOutcome, Draft, DraftOutcome, TranslationEffect
 use crate::single_instance::SingleInstance;
 use crate::ui::widgets::DateFilterState;
 use crate::ui::TestConnection;
-use crate::ui::{CardEditor, GroupEditor, GroupEditorMode, SettingsForm, View};
+use crate::ui::{CardEditor, GroupEditor, GroupEditorMode, IoDialog, SettingsForm, View};
 use crate::{hotkey, notify, selection, tray, validation};
 
 /// Root application object.
@@ -40,6 +40,7 @@ pub struct DcardsApp {
     pub(crate) review: Option<crate::review::Session>,
     pub(crate) review_filter: DateFilterState,
     pub(crate) card_editor: Option<CardEditor>,
+    pub(crate) io_dialog: Option<IoDialog>,
     pub(crate) draft: Option<Draft>,
     pub(crate) next_generation: u64,
     pub(crate) group_editor: Option<GroupEditor>,
@@ -121,6 +122,7 @@ impl DcardsApp {
             review: None,
             review_filter: DateFilterState::default(),
             card_editor: None,
+            io_dialog: None,
             draft: None,
             next_generation: 0,
             group_editor: None,
@@ -140,6 +142,15 @@ impl DcardsApp {
         &self,
         f: impl FnOnce(&Connection) -> db::Result<T>,
     ) -> db::Result<T> {
+        let conn = self
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&conn)
+    }
+
+    /// Lock the database and run `f`, returning its value unchanged.
+    pub(crate) fn with_conn_raw<T>(&self, f: impl FnOnce(&Connection) -> T) -> T {
         let conn = self
             .db
             .lock()
@@ -686,6 +697,7 @@ impl eframe::App for DcardsApp {
 
         self.ui_group_editor(ctx);
         self.ui_card_editor(ctx);
+        self.ui_io_dialog(ctx);
         self.ui_draft_viewport(ctx);
 
         if self.quit {

@@ -40,6 +40,17 @@ pub struct CardFilter {
     pub to: Option<i64>,
 }
 
+/// A card together with its group name, used by TSV export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportRow {
+    /// Front side.
+    pub front: String,
+    /// Back side.
+    pub back: String,
+    /// Name of the owning group.
+    pub group: String,
+}
+
 /// One side of a language pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {

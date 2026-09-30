@@ -3,7 +3,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use super::groups;
-use super::models::{Card, CardFilter};
+use super::models::{Card, CardFilter, ExportRow};
 use super::{now, timed, DbError, Result};
 
 /// Ordering of card query results.
@@ -146,6 +146,33 @@ pub fn count_by_group(conn: &Connection, group_id: i64) -> Result<i64> {
             params![group_id],
             |row| row.get(0),
         )?)
+    })
+}
+
+/// Cards joined with their group names, optionally restricted to one group.
+///
+/// Used by the TSV export; ordered by group name then insertion order.
+pub fn export_rows(conn: &Connection, group_id: Option<i64>) -> Result<Vec<ExportRow>> {
+    timed("cards::export_rows", || {
+        let mut stmt = conn.prepare(
+            "SELECT cards.front, cards.back, groups.name
+             FROM cards
+             JOIN groups ON groups.id = cards.group_id
+             WHERE (?1 IS NULL OR cards.group_id = ?1)
+             ORDER BY groups.name COLLATE NOCASE, cards.id",
+        )?;
+        let rows = stmt.query_map(params![group_id], |row| {
+            Ok(ExportRow {
+                front: row.get(0)?,
+                back: row.get(1)?,
+                group: row.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     })
 }
 

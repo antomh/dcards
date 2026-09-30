@@ -5,6 +5,8 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::app::DcardsApp;
 use crate::ui::widgets;
+use crate::ui::{IoDialog, IoMode};
+use crate::{export, import, notify};
 
 impl DcardsApp {
     /// Right-hand panel: cards of the selected group.
@@ -38,11 +40,18 @@ impl DcardsApp {
                 }
             }
             ui.separator();
-            if ui.button("Export").clicked() {
-                self.set_status("Export arrives in stage 6.");
-            }
-            if ui.button("Import").clicked() {
-                self.set_status("Import arrives in stage 6.");
+            ui.menu_button("Export", |ui| {
+                if ui.button("This group").clicked() {
+                    self.io_dialog = Some(IoDialog::new(IoMode::ExportGroup));
+                    ui.close_menu();
+                }
+                if ui.button("All cards").clicked() {
+                    self.io_dialog = Some(IoDialog::new(IoMode::ExportAll));
+                    ui.close_menu();
+                }
+            });
+            if ui.button("Import TSV").clicked() {
+                self.io_dialog = Some(IoDialog::new(IoMode::Import));
             }
         });
 
@@ -206,5 +215,110 @@ fn format_created(timestamp: i64) -> String {
     match Local.timestamp_opt(timestamp, 0) {
         LocalResult::Single(datetime) => datetime.format("%Y-%m-%d %H:%M").to_string(),
         _ => timestamp.to_string(),
+    }
+}
+
+impl DcardsApp {
+    /// Import/export dialog: a plain path field and a confirm button.
+    pub(crate) fn ui_io_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.io_dialog.take() else {
+            return;
+        };
+
+        let mut open = true;
+        let mut run = false;
+        let mut cancel = false;
+
+        egui::Window::new(dialog.title())
+            .collapsible(false)
+            .resizable(false)
+            .default_width(460.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("File path");
+                ui.add(
+                    egui::TextEdit::singleline(&mut dialog.path)
+                        .hint_text("/home/user/cards.tsv")
+                        .desired_width(f32::INFINITY),
+                );
+
+                if let Some(message) = &dialog.message {
+                    ui.colored_label(ui.visuals().error_fg_color, message);
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button(dialog.action_label()).clicked() {
+                        run = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if run {
+            self.io_dialog = Some(dialog);
+            self.run_io();
+            return;
+        }
+        if !cancel && open {
+            self.io_dialog = Some(dialog);
+        }
+    }
+
+    /// Run the import/export operation described by the current dialog.
+    fn run_io(&mut self) {
+        let Some(mut dialog) = self.io_dialog.take() else {
+            return;
+        };
+
+        let path_text = dialog.path.trim().to_string();
+        if path_text.is_empty() {
+            dialog.message = Some("Enter a file path.".to_string());
+            self.io_dialog = Some(dialog);
+            return;
+        }
+        let path = std::path::PathBuf::from(&path_text);
+
+        let result: Result<String, String> = match dialog.mode {
+            IoMode::ExportGroup => match self.selected_group {
+                None => Err("Select a group first.".to_string()),
+                Some(group_id) => self
+                    .with_conn_raw(|conn| export::export_group(conn, group_id, &path))
+                    .map(|count| format!("Exported {count} cards to {path_text}"))
+                    .map_err(|err| err.to_string()),
+            },
+            IoMode::ExportAll => self
+                .with_conn_raw(|conn| export::export_all(conn, &path))
+                .map(|count| format!("Exported {count} cards to {path_text}"))
+                .map_err(|err| err.to_string()),
+            IoMode::Import => {
+                let default_group = self.config.general.default_group.clone();
+                match self.with_conn_raw(|conn| import::import_tsv(conn, &path, &default_group)) {
+                    Ok(summary) => {
+                        self.refresh_groups();
+                        Ok(format!(
+                            "Imported {} cards ({} new groups)",
+                            summary.cards, summary.groups_created
+                        ))
+                    }
+                    Err(err) => Err(err.to_string()),
+                }
+            }
+        };
+
+        match result {
+            Ok(message) => {
+                self.set_status(message);
+                self.io_dialog = None;
+            }
+            Err(message) => {
+                tracing::error!(error = %message, "import/export failed");
+                notify::error("dcards", &message);
+                dialog.message = Some(format!("Error: {message}"));
+                self.io_dialog = Some(dialog);
+            }
+        }
     }
 }
